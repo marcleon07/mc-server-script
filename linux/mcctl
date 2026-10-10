@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
 # mcctl - control the Minecraft network. Run with sudo.
+# A second network on the same machine has its own copy, called mcctl-<name>.
 set -euo pipefail
 BASE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 source "$BASE/network.conf"
+NAME="${NAME:-mcnet}" UNIT="${UNIT:-mcnet}" DB="${DB:-luckperms}" ME="$(basename "$0")"
 
 usage() {
   cat <<EOF
-usage: sudo mcctl <command> [server]        servers: $(names | xargs) (or all)
+usage: sudo $ME <command> [server]        network $NAME, servers: $(names | xargs) (or all)
 
   start [server|all]       start (all: hub and games first, proxy last)
   stop [server|all]        save and stop (all: proxy first)
   restart [server|all]
   status                   what is running
   console <server>         live console: type commands, Ctrl+D to leave (the server keeps running)
-  cmd <server> <command>   run one console command, e.g. mcctl cmd lobby "lp user Steve parent set vip"
+  cmd <server> <command>   run one console command, e.g. $ME cmd $HUB "lp user Steve parent set vip"
   log <server>             follow the log (Ctrl+C to leave)
   backup                   save the worlds and pack every server + the ranks into $BASE/backups/
+                           (keeps the newest ${BACKUP_KEEP:-7}; BACKUP_KEEP in network.conf)
   autostart on|off         start the network when the machine boots
+  autobackup on|off        run the backup every night at 04:00
 EOF
 }
 
 names() { for e in $SERVERS; do echo "${e%%:*}"; done; }
 folder() {
-  local e n f r
-  for e in $SERVERS; do IFS=: read -r n f r <<<"$e"; [ "$n" = "$1" ] && { echo "$f"; return; }; done
+  local e n f r p
+  for e in $SERVERS; do IFS=: read -r n f r p <<<"$e"; [ "$n" = "$1" ] && { echo "$f"; return; }; done
   echo "unknown server: $1 (have: $(names | xargs))" >&2; exit 1
 }
 targets() { if [ "${1:-all}" = all ]; then names; else folder "$1" >/dev/null; echo "$1"; fi; }
-running() { systemctl is-active -q "mcnet@$1"; }
+running() { systemctl is-active -q "$UNIT@$1"; }
 
 send() {  # send <server> <console command>
   local fifo; fifo="$BASE/$(folder "$1")/console.fifo"
@@ -38,62 +42,82 @@ send() {  # send <server> <console command>
 wait_for() {  # wait_for <server> <regex> <timeout s> <since epoch>: watch the console output for regex
   local i
   for ((i = 0; i < $3; i += 2)); do
-    journalctl -q -u "mcnet@$1" --since "@$4" -o cat | grep -qE "$2" && return 0
-    running "$1" || { echo "$1 stopped - see: mcctl log $1" >&2; return 1; }
+    journalctl -q -u "$UNIT@$1" --since "@$4" -o cat | grep -qE "$2" && return 0
+    running "$1" || { echo "$1 stopped - see: $ME log $1" >&2; return 1; }
     sleep 2
   done
   echo "timed out waiting for $1" >&2; return 1
 }
 
-[ "$(id -u)" = 0 ] || { echo "run with sudo: sudo mcctl $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "run with sudo: sudo $ME $*" >&2; exit 1; }
 cmd="${1:-}"; shift || true
 case "$cmd" in
   start)
-    for n in $(targets "${1:-all}"); do systemctl start "mcnet@$n" && echo "started $n"; done ;;
+    for n in $(targets "${1:-all}"); do systemctl start "$UNIT@$n" && echo "started $n"; done ;;
   stop)
-    for n in $(targets "${1:-all}" | tac); do systemctl stop "mcnet@$n" && echo "stopped $n"; done ;;
+    for n in $(targets "${1:-all}" | tac); do systemctl stop "$UNIT@$n" && echo "stopped $n"; done ;;
   restart)
     "$0" stop "${1:-all}"; "$0" start "${1:-all}" ;;
   status)
-    printf '%-10s %-18s %-6s %s\n' SERVER FOLDER RAM STATE
+    printf '%-10s %-18s %-6s %-6s %-7s %s\n' SERVER FOLDER PORT RAM USED STATE
     for e in $SERVERS; do
-      IFS=: read -r n f r <<<"$e"
-      printf '%-10s %-18s %-6s %s\n' "$n" "$f" "$r" "$(systemctl is-active "mcnet@$n" || true)"
+      IFS=: read -r n f r p <<<"$e"
+      used=$(systemctl show -p MemoryCurrent --value "$UNIT@$n" 2>/dev/null || true)
+      [[ "$used" =~ ^[0-9]+$ ]] && used="$((used / 1048576))M" || used=-
+      printf '%-10s %-18s %-6s %-6s %-7s %s\n' "$n" "$f" "${p:--}" "$r" "$used" \
+        "$(systemctl is-active "$UNIT@$n" || true)"
     done
-    echo "players connect to port $PORT" ;;
+    echo "network $NAME - players connect to port $PORT" ;;
   console)
-    n="${1:?usage: mcctl console <server>}"; f="$BASE/$(folder "$n")"
+    n="${1:?usage: $ME console <server>}"; f="$BASE/$(folder "$n")"
     running "$n" || { echo "$n is not running" >&2; exit 1; }
     tail -n 30 -F "$f/logs/latest.log" 2>/dev/null &
     trap 'kill $! 2>/dev/null' EXIT
     sleep 0.3; echo "--- $n console: type commands, Ctrl+D to leave (the server keeps running) ---"
     while IFS= read -r -e line; do [ -n "$line" ] && send "$n" "$line"; done ;;
   cmd)
-    n="${1:?usage: mcctl cmd <server> <command>}"; shift
+    n="${1:?usage: $ME cmd <server> <command>}"; shift
     send "$n" "$*" ;;
   log)
-    n="${1:?usage: mcctl log <server>}"; tail -n 100 -F "$BASE/$(folder "$n")/logs/latest.log" ;;
-  wait)  # internal (install.sh): mcctl wait <server> <regex> <timeout s> <since epoch>
+    n="${1:?usage: $ME log <server>}"; tail -n 100 -F "$BASE/$(folder "$n")/logs/latest.log" ;;
+  wait)  # internal (install.sh): $ME wait <server> <regex> <timeout s> <since epoch>
     wait_for "$@" ;;
   backup)
+    umask 077   # backups hold the configs with the secrets and the rank database
     mkdir -p "$BASE/backups"; out="$BASE/backups/network-$(date +%Y-%m-%d_%H-%M).tar.gz"
+    sql="$BASE/backups/luckperms.sql"
+    dump="$(command -v mariadb-dump || command -v mysqldump)" || { echo "mariadb-dump not found" >&2; exit 1; }
     live=()
     for n in $(names); do [ "$n" != proxy ] && running "$n" && live+=("$n"); done
-    trap 'for n in "${live[@]}"; do send "$n" "save-on" || true; done' EXIT   # also if the backup fails
+    trap 'for n in "${live[@]}"; do send "$n" "save-on" || true; done; rm -f "$sql"' EXIT   # also if it fails
+    since=$(date +%s)
     for n in "${live[@]}"; do send "$n" "save-off"; send "$n" "save-all flush"; done
-    [ ${#live[@]} -gt 0 ] && sleep 10
-    mariadb-dump --single-transaction luckperms > "$BASE/backups/luckperms.sql" 2>/dev/null \
-      || mysqldump --single-transaction luckperms > "$BASE/backups/luckperms.sql"
+    for n in "${live[@]}"; do
+      wait_for "$n" 'Saved the game' 60 "$since" || echo "WARNING: $n did not confirm the save" >&2
+    done
+    "$dump" --single-transaction "$DB" > "$sql"
     dirs=(); for e in $SERVERS; do dirs+=("${e#*:}"); done
-    tar -czf "$out" -C "$BASE" --exclude='*/libraries' --exclude='*/cache' --exclude='*/versions' \
-      --exclude='*/logs' --exclude='*/console.fifo' "${dirs[@]%%:*}" backups/luckperms.sql network.conf
-    rm -f "$BASE/backups/luckperms.sql"
-    echo "backup: $out ($(du -h "$out" | cut -f1))" ;;
+    rc=0   # tar exit 1 = a plugin wrote a file while it was packed; the backup is still usable
+    tar -czf "$out" --warning=no-file-changed -C "$BASE" --exclude='*/libraries' --exclude='*/cache' \
+      --exclude='*/versions' --exclude='*/logs' --exclude='*/console.fifo' \
+      "${dirs[@]%%:*}" backups/luckperms.sql network.conf || rc=$?
+    [ "$rc" -le 1 ] || { rm -f "$out"; echo "backup failed (tar exit $rc)" >&2; exit 1; }
+    echo "backup: $out ($(du -h "$out" | cut -f1))"
+    ls -1t "$BASE"/backups/network-*.tar.gz | tail -n +$((${BACKUP_KEEP:-7} + 1)) | while read -r old; do
+      rm -f "$old"; echo "removed old backup $(basename "$old")"
+    done ;;
   autostart)
     case "${1:-}" in
-      on)  for n in $(names); do systemctl enable -q "mcnet@$n"; done; echo "the network starts on boot" ;;
-      off) for n in $(names); do systemctl disable -q "mcnet@$n"; done; echo "autostart off" ;;
-      *)   echo "usage: mcctl autostart on|off" >&2; exit 1 ;;
+      on)  for n in $(names); do systemctl enable -q "$UNIT@$n"; done; echo "the network starts on boot" ;;
+      off) for n in $(names); do systemctl disable -q "$UNIT@$n"; done; echo "autostart off" ;;
+      *)   echo "usage: $ME autostart on|off" >&2; exit 1 ;;
+    esac ;;
+  autobackup)
+    case "${1:-}" in
+      on)  systemctl enable -q --now "$UNIT-backup.timer"
+           echo "backup every night at 04:00, keeping the newest ${BACKUP_KEEP:-7}" ;;
+      off) systemctl disable -q --now "$UNIT-backup.timer"; echo "autobackup off" ;;
+      *)   echo "usage: $ME autobackup on|off" >&2; exit 1 ;;
     esac ;;
   ""|-h|--help|help) usage ;;
   *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;

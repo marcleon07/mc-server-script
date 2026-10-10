@@ -2,36 +2,80 @@
 # Installs the Minecraft network from this package on a Linux server.
 # Debian 12+/Ubuntu 22.04+ (apt) or Fedora/RHEL/Rocky/Alma 9+ (dnf), 64-bit, with internet access.
 #
-#   sudo ./install.sh [options]
+#   sudo ./install.sh [options]          without --type or --servers it asks what to install
+#     --type TYPE           full       hub + CityBuild + all minigames (default)
+#                           minigames  hub + the minigames, no CityBuild
+#                           citybuild  CityBuild on its own (players arrive there)
+#     --servers LIST        pick the servers yourself, e.g. lobby,bedwars,skywars
+#     --name NAME           name of this network (default mcnet). A second network on the same machine
+#                           needs its own name, e.g. --name citybuild; it gets its own ports, ranks
+#                           database and command (mcctl-citybuild)
 #     --owner NAME          your Minecraft name: op everywhere + the owner rank
-#     --servers LIST        which servers to install, e.g. lobby,bedwars,skywars (default: all)
 #     --ram LIST            change RAM, e.g. bedwars=4G,lobby=1G,proxy=512M
-#     --port N              port players connect to (default 25565)
-#     --dir PATH            install folder (default /opt/mcnet)
+#     --port N              port players connect to (default 25565, or the next free one)
+#     --motd TEXT           server list message (default: made from the installed servers)
+#     --dir PATH            install folder (default /opt/mcnet, or /opt/<name>)
 #     --accept-eula         accept the Minecraft EULA without asking (https://aka.ms/MinecraftEULA)
 #     --no-start            set everything up but do not start the servers
 set -euo pipefail
 PKG="$(cd "$(dirname "$0")" && pwd)"
-DIR=/opt/mcnet SERVERS=all PORT=25565 OWNER="" RAM="" EULA=no START=yes
+NAME=mcnet DIR="" TYPE="" SERVERS="" PORT="" OWNER="" RAM="" MOTD="" EULA=no START=yes
+REGISTRY=/etc/mcnet/networks   # every installed network's folder, so a new one picks free ports
 
 die() { echo "install: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --owner) OWNER="$2"; shift 2 ;;
+    --type) TYPE="$2"; shift 2 ;;
     --servers) SERVERS="$2"; shift 2 ;;
+    --name) NAME="$2"; shift 2 ;;
+    --owner) OWNER="$2"; shift 2 ;;
     --ram) RAM="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
+    --motd) MOTD="$2"; shift 2 ;;
     --dir) DIR="$2"; shift 2 ;;
     --accept-eula) EULA=yes; shift ;;
     --no-start) START=no; shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
 [ "$(id -u)" = 0 ] || die "run as root: sudo ./install.sh"
 [ -f "$PKG/network.json" ] || die "run this from the unpacked package folder"
-[ -e "$DIR/network.conf" ] && die "$DIR already has a network - manage it with: sudo mcctl"
-[[ "$PORT" =~ ^[0-9]+$ ]] || die "--port must be a number"
+[ -z "$PORT" ] || [[ "$PORT" =~ ^[0-9]+$ ]] || die "--port must be a number"
+unit_of() { if [ "$1" = mcnet ]; then echo mcnet; else echo "mcnet-$1"; fi; }
+exists() { [ -e "/etc/systemd/system/$(unit_of "$1")@.service" ]; }
+
+# ---- what to install: ask when nothing was given ------------------------------------------------------------
+pkg_names() { grep -o '"name": "[^"]*"' "$PKG/network.json" | cut -d'"' -f4; }
+if [ -z "$TYPE$SERVERS" ] && [ -t 0 ]; then
+  games=$(pkg_names | grep -vxE 'lobby|citybuild' | xargs | sed 's/ /, /g' || true)
+  cat <<EOF
+What should this machine run?
+  1) the full network: hub, CityBuild and the minigames
+  2) minigames: hub + $games
+  3) CityBuild on its own
+  4) choose the servers yourself
+EOF
+  read -r -p "Choice [1]: " c
+  case "${c:-1}" in
+    1) TYPE=full ;; 2) TYPE=minigames ;; 3) TYPE=citybuild ;;
+    4) echo "Servers in this package: $(pkg_names | xargs)"
+       read -r -p "Which ones (comma separated): " SERVERS ;;
+    *) die "no such choice: $c" ;;
+  esac
+  if [ "$NAME" = mcnet ] && exists mcnet; then
+    echo "This machine already runs a network called mcnet. The new one runs next to it with its own name."
+    def=$([ "$TYPE" = citybuild ] && echo citybuild || echo minigames)
+    read -r -p "Name for the new network [$def]: " NAME; NAME="${NAME:-$def}"
+  fi
+fi
+TYPE="${TYPE:-full}"
+[[ "$NAME" =~ ^[a-z][a-z0-9]{0,19}$ ]] || die "--name: lower-case letters and digits, starting with a letter"
+exists "$NAME" && die "a network called $NAME is already installed - give the new one another --name"
+UNIT="$(unit_of "$NAME")"
+if [ "$NAME" = mcnet ]; then CTL=mcctl; else CTL="mcctl-$NAME"; fi
+DIR="${DIR:-/opt/$NAME}"
+[ -e "$DIR/network.conf" ] && die "$DIR already has a network - manage it with: sudo $CTL"
 
 if [ "$EULA" != yes ]; then
   echo "Minecraft servers may only run if you accept the Minecraft EULA: https://aka.ms/MinecraftEULA"
@@ -87,15 +131,39 @@ systemctl enable --now mariadb
 # ---- the network ------------------------------------------------------------------------------------------
 id minecraft >/dev/null 2>&1 || useradd --system --user-group --home-dir "$DIR" --no-create-home \
   --shell "$(command -v nologin || echo /bin/false)" minecraft
-python3 "$PKG/configure.py" --pkg "$PKG" --dest "$DIR" --java "$JAVA" --servers "$SERVERS" --port "$PORT" \
-  --ram "$RAM" --owner "$OWNER" --accept-eula
+args=(--pkg "$PKG" --dest "$DIR" --java "$JAVA" --name "$NAME" --type "$TYPE" --servers "$SERVERS"
+      --ram "$RAM" --motd "$MOTD" --owner "$OWNER" --registry "$REGISTRY" --accept-eula)
+[ -n "$PORT" ] && args+=(--port "$PORT")
+python3 "$PKG/configure.py" "${args[@]}"
+source "$DIR/network.conf"   # what configure.py chose: SERVERS, HUB, PORT, OWNER_UUID
+mkdir -p "$(dirname "$REGISTRY")"; echo "$DIR" >> "$REGISTRY"
 chown -R minecraft:minecraft "$DIR"
 chmod 750 "$DIR"
 chmod 600 "$DIR/SECRETS.txt"
-sed "s|@DIR@|$DIR|g" "$PKG/mcnet@.service" > /etc/systemd/system/mcnet@.service
-ln -sf "$DIR/bin/mcctl" /usr/local/bin/mcctl
+sed -e "s|@DIR@|$DIR|g" -e "s|@NAME@|$NAME|g" "$PKG/mcnet@.service" > "/etc/systemd/system/$UNIT@.service"
+ln -sf "$DIR/bin/mcctl" "/usr/local/bin/$CTL"
+
+# nightly backup at 04:00 ($CTL autobackup off disables it)
+cat > "/etc/systemd/system/$UNIT-backup.service" <<UNIT
+[Unit]
+Description=Minecraft network $NAME: backup
+[Service]
+Type=oneshot
+ExecStart=$DIR/bin/mcctl backup
+UNIT
+cat > "/etc/systemd/system/$UNIT-backup.timer" <<UNIT
+[Unit]
+Description=Minecraft network $NAME: nightly backup
+[Timer]
+OnCalendar=*-*-* 04:00
+RandomizedDelaySec=30min
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
 systemctl daemon-reload
-mcctl autostart on
+"$DIR/bin/mcctl" autostart on
+"$DIR/bin/mcctl" autobackup on
 
 # ---- firewall: only the proxy port is opened; the servers listen on 127.0.0.1 only ------------------------
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
@@ -107,27 +175,28 @@ if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -E ':3306$' | grep -qvE '^(127
   echo "WARNING: MariaDB listens on a public address. Set bind-address=127.0.0.1 in its config and restart it."
 fi
 
-# ---- first start: hub, import the ranks, then everything else ---------------------------------------------
+# ---- first start: the hub (or the only server), import the ranks, then everything else --------------------
 if [ "$START" = yes ]; then
-  source "$DIR/network.conf"
   since=$(date +%s)
-  echo "Starting the hub (the first start downloads the Minecraft server files and can take a few minutes)..."
-  mcctl start lobby
-  mcctl wait lobby 'Done \(' 900 "$since" || die "the hub did not start - see: sudo mcctl log lobby"
+  echo "Starting $HUB (the first start downloads the Minecraft server files and can take a few minutes)..."
+  "$DIR/bin/mcctl" start "$HUB"
+  "$DIR/bin/mcctl" wait "$HUB" 'Done \(' 900 "$since" || die "$HUB did not start - see: sudo $CTL log $HUB"
   since=$(date +%s)
-  mcctl cmd lobby "lp import luckperms-network.json.gz"
-  mcctl wait lobby 'COMPLETED' 180 "$since" && echo "ranks imported" || echo "WARNING: rank import not confirmed - check: sudo mcctl log lobby"
-  [ -n "$OWNER_UUID" ] && mcctl cmd lobby "lp user $OWNER_UUID parent set owner"
-  mcctl start all
+  "$DIR/bin/mcctl" cmd "$HUB" "lp import luckperms-network.json.gz"
+  "$DIR/bin/mcctl" wait "$HUB" 'COMPLETED' 180 "$since" && echo "ranks imported" \
+    || echo "WARNING: rank import not confirmed - check: sudo $CTL log $HUB"
+  [ -n "$OWNER_UUID" ] && "$DIR/bin/mcctl" cmd "$HUB" "lp user $OWNER_UUID parent set owner"
+  "$DIR/bin/mcctl" start all
 fi
 
 ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+join="$ip"; [ "$PORT" = 25565 ] || join="$ip:$PORT"
 cat <<EOF
 
-Installed in $DIR.  Players join: $ip:$PORT
-  sudo mcctl status            what is running (the game servers need a minute after starting)
-  sudo mcctl console lobby     hub console (Ctrl+D to leave)
-  sudo mcctl stop | start      whole network
-  sudo mcctl backup            backup into $DIR/backups
+Network $NAME installed in $DIR.  Players join: $join
+  sudo $CTL status            what is running (the game servers need a minute after starting)
+  sudo $CTL console $HUB     console (Ctrl+D to leave)
+  sudo $CTL stop | start      whole network
+  sudo $CTL backup            backup into $DIR/backups (also runs every night at 04:00)
 If the machine is at a hosting provider, also allow TCP $PORT in its firewall panel.
 EOF

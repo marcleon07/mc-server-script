@@ -9,6 +9,7 @@ These are the tools behind a small Minecraft network: one hub, CityBuild and one
 | [`lobbygen.py`](lobbygen.py) | Builds the hub: a plaza with gates to every game mode, as console commands, plus a top-down preview. |
 | [`gamelobby.py`](gamelobby.py) | Builds the small themed lobby of one game server, with join signs. |
 | [`png.py`](png.py) | Turns the hub preview into a PNG image. |
+| [`backup.py`](backup.py) | Backs up the network on Windows: server folders, proxy and the LuckPerms database, keeping the newest 7. |
 
 This repository holds only the tools. It does not include the servers, plugins, maps or Minecraft itself. Get those from their own sources and follow their licences.
 
@@ -83,6 +84,8 @@ On the Linux server, `install.sh` does the rest:
 - installs Java 25 and MariaDB;
 - asks you to accept the Minecraft EULA;
 - creates new secrets;
+- installs the whole network, only the minigames or only CityBuild (`--type`), or your own pick of servers;
+- can run several networks side by side on one machine (`--name`), each with its own ports and ranks;
 - sets up one systemd service per server;
 - opens only the proxy port.
 

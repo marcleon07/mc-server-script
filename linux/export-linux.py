@@ -34,7 +34,7 @@ SKIP_NAMES = {"session.lock", "__pycache__"}
 SKIP_SUFFIX = (".log", ".log.gz", ".json.gz", ".mv.db", ".lck")
 EMPTY_JSON = {"ops.json", "banned-players.json", "banned-ips.json", "whitelist.json"}
 NEWBIE_KIT_SERVERS = {"citybuild-server"}   # only survival keeps EssentialsX's starter kit
-FWD, DBPW ="__FORWARDING_SECRET__", "__LUCKPERMS_DB_PASSWORD__"
+FWD, DBPW = "__FORWARDING_SECRET__", "__LUCKPERMS_DB_PASSWORD__"
 
 
 def read(p):
@@ -51,14 +51,15 @@ network = {"proxy": {"folder": "proxy", "ram": ram_of("proxy"),
 for name, port in re.findall(r'(?m)^(\w+) = "127\.0\.0\.1:(\d+)"', servers_block):
     folder = f"{name}-server"
     assert os.path.isdir(J(ROOT, folder)), f"velocity.toml lists {name}, but there is no {folder} folder"
-    network["servers"].append({"name": name, "folder": folder, "port": int(port), "ram": ram_of(folder)})
+    kind = "hub" if name == "lobby" else "survival" if folder in NEWBIE_KIT_SERVERS else "game"   # for install.sh --type
+    network["servers"].append({"name": name, "folder": folder, "port": int(port), "ram": ram_of(folder), "kind": kind})
 assert network["servers"] and network["servers"][0]["name"] == "lobby", "the first server must be lobby"
 
 # secrets that must not leave this PC
 secrets = {read(J(ROOT, "proxy", "forwarding.secret")).strip()}
 for s in network["servers"]:
     lp = read(J(ROOT, s["folder"], "plugins/LuckPerms/config.yml"))
-    secrets.add(re.search(r"(?m)^  username: luckperms\n  password: '([^']*)'", lp).group(1))
+    secrets.add(re.search(r"(?m)^  username: luckperms\r?\n  password: '([^']*)'", lp).group(1))
     secrets.update(re.findall(r"(?m)^management-server-secret=(\S+)", read(J(ROOT, s["folder"], "server.properties"))))
 pw_file = J(ROOT, "mariadb", "PASSWORDS.txt")
 if os.path.exists(pw_file):
@@ -137,7 +138,7 @@ for s in network["servers"]:
     add_tree(s["folder"], {p.replace("{world}", world) for p in SKIP})
     print("packed", s["folder"])
 add_tree("proxy", set(SKIP))
-add_tree("tools", {"linux"})
+add_tree("tools", {"linux", "backup.py"})        # backup.py is for Windows; Linux has mcctl backup
 add_bytes("files/SERVER-GUIDE.md", open(J(ROOT, "SERVER-GUIDE.md"), "rb").read())
 
 for f in ["install.sh", "configure.py", "mcctl", "run", "mcnet@.service", "README.md"]:

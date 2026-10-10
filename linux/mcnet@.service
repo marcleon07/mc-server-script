@@ -1,5 +1,5 @@
 [Unit]
-Description=Minecraft network: %i
+Description=Minecraft network @NAME@: %i
 After=network-online.target mariadb.service
 Wants=network-online.target mariadb.service
 
@@ -15,6 +15,15 @@ RestartSec=10
 SuccessExitStatus=0 143
 TimeoutStopSec=120
 LimitNOFILE=65536
+# a compromised plugin can only write inside the network folder
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@DIR@
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
 
 [Install]
 WantedBy=multi-user.target
