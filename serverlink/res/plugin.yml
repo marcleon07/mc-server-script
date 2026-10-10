@@ -1,0 +1,6 @@
+name: ServerLink
+version: '1.0'
+main: dev.mcserver.serverlink.ServerLink
+api-version: '1.21'
+softdepend: [Multiverse-Core]
+description: Sends players between servers behind the Velocity proxy.

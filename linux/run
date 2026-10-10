@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Runs one server of the network in the foreground. Started by systemd as mcnet@<name>.
+# Console commands come in through <folder>/console.fifo (mcctl cmd / mcctl console write there).
+set -euo pipefail
+BASE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+source "$BASE/network.conf"
+
+name="${1:?usage: run <name>}" folder="" ram=""
+for e in $SERVERS; do
+  IFS=: read -r n f r <<<"$e"
+  if [ "$n" = "$name" ]; then folder="$f" ram="$r"; fi
+done
+[ -n "$folder" ] || { echo "unknown server: $name" >&2; exit 1; }
+cd "$BASE/$folder"
+
+rm -f console.fifo
+mkfifo -m 600 console.fifo
+exec 3<>console.fifo   # held open read+write, so the server never sees end-of-input
+
+if [ "$name" = proxy ]; then
+  exec "$JAVA" -Xms"$ram" -Xmx"$ram" -XX:+UseG1GC -XX:G1HeapRegionSize=4M -XX:+UnlockExperimentalVMOptions \
+    -XX:+ParallelRefProcEnabled -XX:+AlwaysPreTouch -XX:MaxInlineLevel=15 -jar velocity.jar <&3
+fi
+exec "$JAVA" -Xms"$ram" -Xmx"$ram" -XX:+AlwaysPreTouch -XX:+DisableExplicitGC -XX:+ParallelRefProcEnabled \
+  -XX:+PerfDisableSharedMem -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1HeapRegionSize=8M \
+  -XX:G1HeapWastePercent=5 -XX:G1MaxNewSizePercent=40 -XX:G1MixedGCCountTarget=4 \
+  -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1NewSizePercent=30 -XX:G1RSetUpdatingPauseTimePercent=5 \
+  -XX:G1ReservePercent=20 -XX:InitiatingHeapOccupancyPercent=15 -XX:MaxGCPauseMillis=200 \
+  -XX:MaxTenuringThreshold=1 -XX:SurvivorRatio=32 -jar paper.jar --nogui <&3

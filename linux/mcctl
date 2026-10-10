@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# mcctl - control the Minecraft network. Run with sudo.
+set -euo pipefail
+BASE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+source "$BASE/network.conf"
+
+usage() {
+  cat <<EOF
+usage: sudo mcctl <command> [server]        servers: $(names | xargs) (or all)
+
+  start [server|all]       start (all: hub and games first, proxy last)
+  stop [server|all]        save and stop (all: proxy first)
+  restart [server|all]
+  status                   what is running
+  console <server>         live console: type commands, Ctrl+D to leave (the server keeps running)
+  cmd <server> <command>   run one console command, e.g. mcctl cmd lobby "lp user Steve parent set vip"
+  log <server>             follow the log (Ctrl+C to leave)
+  backup                   save the worlds and pack every server + the ranks into $BASE/backups/
+  autostart on|off         start the network when the machine boots
+EOF
+}
+
+names() { for e in $SERVERS; do echo "${e%%:*}"; done; }
+folder() {
+  local e n f r
+  for e in $SERVERS; do IFS=: read -r n f r <<<"$e"; [ "$n" = "$1" ] && { echo "$f"; return; }; done
+  echo "unknown server: $1 (have: $(names | xargs))" >&2; exit 1
+}
+targets() { if [ "${1:-all}" = all ]; then names; else folder "$1" >/dev/null; echo "$1"; fi; }
+running() { systemctl is-active -q "mcnet@$1"; }
+
+send() {  # send <server> <console command>
+  local fifo; fifo="$BASE/$(folder "$1")/console.fifo"
+  running "$1" && [ -p "$fifo" ] || { echo "$1 is not running" >&2; return 1; }
+  timeout 5 bash -c 'printf "%s\n" "$1" > "$2"' _ "$2" "$fifo"
+}
+
+wait_for() {  # wait_for <server> <regex> <timeout s> <since epoch>: watch the console output for regex
+  local i
+  for ((i = 0; i < $3; i += 2)); do
+    journalctl -q -u "mcnet@$1" --since "@$4" -o cat | grep -qE "$2" && return 0
+    running "$1" || { echo "$1 stopped - see: mcctl log $1" >&2; return 1; }
+    sleep 2
+  done
+  echo "timed out waiting for $1" >&2; return 1
+}
+
+[ "$(id -u)" = 0 ] || { echo "run with sudo: sudo mcctl $*" >&2; exit 1; }
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  start)
+    for n in $(targets "${1:-all}"); do systemctl start "mcnet@$n" && echo "started $n"; done ;;
+  stop)
+    for n in $(targets "${1:-all}" | tac); do systemctl stop "mcnet@$n" && echo "stopped $n"; done ;;
+  restart)
+    "$0" stop "${1:-all}"; "$0" start "${1:-all}" ;;
+  status)
+    printf '%-10s %-18s %-6s %s\n' SERVER FOLDER RAM STATE
+    for e in $SERVERS; do
+      IFS=: read -r n f r <<<"$e"
+      printf '%-10s %-18s %-6s %s\n' "$n" "$f" "$r" "$(systemctl is-active "mcnet@$n" || true)"
+    done
+    echo "players connect to port $PORT" ;;
+  console)
+    n="${1:?usage: mcctl console <server>}"; f="$BASE/$(folder "$n")"
+    running "$n" || { echo "$n is not running" >&2; exit 1; }
+    tail -n 30 -F "$f/logs/latest.log" 2>/dev/null &
+    trap 'kill $! 2>/dev/null' EXIT
+    sleep 0.3; echo "--- $n console: type commands, Ctrl+D to leave (the server keeps running) ---"
+    while IFS= read -r -e line; do [ -n "$line" ] && send "$n" "$line"; done ;;
+  cmd)
+    n="${1:?usage: mcctl cmd <server> <command>}"; shift
+    send "$n" "$*" ;;
+  log)
+    n="${1:?usage: mcctl log <server>}"; tail -n 100 -F "$BASE/$(folder "$n")/logs/latest.log" ;;
+  wait)  # internal (install.sh): mcctl wait <server> <regex> <timeout s> <since epoch>
+    wait_for "$@" ;;
+  backup)
+    mkdir -p "$BASE/backups"; out="$BASE/backups/network-$(date +%Y-%m-%d_%H-%M).tar.gz"
+    live=()
+    for n in $(names); do [ "$n" != proxy ] && running "$n" && live+=("$n"); done
+    trap 'for n in "${live[@]}"; do send "$n" "save-on" || true; done' EXIT   # also if the backup fails
+    for n in "${live[@]}"; do send "$n" "save-off"; send "$n" "save-all flush"; done
+    [ ${#live[@]} -gt 0 ] && sleep 10
+    mariadb-dump --single-transaction luckperms > "$BASE/backups/luckperms.sql" 2>/dev/null \
+      || mysqldump --single-transaction luckperms > "$BASE/backups/luckperms.sql"
+    dirs=(); for e in $SERVERS; do dirs+=("${e#*:}"); done
+    tar -czf "$out" -C "$BASE" --exclude='*/libraries' --exclude='*/cache' --exclude='*/versions' \
+      --exclude='*/logs' --exclude='*/console.fifo' "${dirs[@]%%:*}" backups/luckperms.sql network.conf
+    rm -f "$BASE/backups/luckperms.sql"
+    echo "backup: $out ($(du -h "$out" | cut -f1))" ;;
+  autostart)
+    case "${1:-}" in
+      on)  for n in $(names); do systemctl enable -q "mcnet@$n"; done; echo "the network starts on boot" ;;
+      off) for n in $(names); do systemctl disable -q "mcnet@$n"; done; echo "autostart off" ;;
+      *)   echo "usage: mcctl autostart on|off" >&2; exit 1 ;;
+    esac ;;
+  ""|-h|--help|help) usage ;;
+  *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;
+esac

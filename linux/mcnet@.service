@@ -1,0 +1,20 @@
+[Unit]
+Description=Minecraft network: %i
+After=network-online.target mariadb.service
+Wants=network-online.target mariadb.service
+
+[Service]
+Type=simple
+User=minecraft
+Group=minecraft
+ExecStart=@DIR@/bin/run %i
+# like the restart loop on Windows: /stop or a crash brings the server back; systemctl stop does not
+Restart=always
+RestartSec=10
+# java exits with 143 after a clean shutdown on SIGTERM (systemctl stop saves the worlds first)
+SuccessExitStatus=0 143
+TimeoutStopSec=120
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

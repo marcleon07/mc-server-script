@@ -1,0 +1,18 @@
+# Each link becomes a command that sends the player to another server behind Velocity.
+# Optional per link:
+#   world:        teleport to that world's spawn on arrival (Multiverse)
+#   location:     teleport to "world x y z [yaw pitch]" on arrival
+#   command:      run this command as the player on arrival; {args} = what they typed after the command
+#   default-args: used for {args} when they typed nothing
+#   aliases:      extra command names
+# Both servers must point shared-folder at the same folder (relative to the server folder).
+shared-folder: ../shared
+links: {}
+# Players standing within <radius> blocks of <location> are sent to <server>
+# (except during the first grace-seconds after they join).
+send-home:
+  enabled: false
+  server: lobby
+  location: lobby 0.5 -4 9.5
+  radius: 6
+  grace-seconds: 5

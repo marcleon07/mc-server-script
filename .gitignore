@@ -1,0 +1,19 @@
+# build output (publish ServerLink.jar as a release download instead)
+serverlink/build/
+serverlink/target/
+*.jar
+*.class
+__pycache__/
+*.pyc
+
+# generated files - can contain your worlds, plugins and other people's maps
+linux-package/
+*.tar.gz
+*_cmds.txt
+*.html
+*.png
+
+# never publish
+SECRETS.txt
+PASSWORDS.txt
+forwarding.secret
