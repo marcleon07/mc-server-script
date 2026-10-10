@@ -81,11 +81,12 @@ The export:
 
 On the Linux server, `install.sh` does the rest:
 
-- installs Java 25 and MariaDB;
+- installs Java 25 and MariaDB (x86 or ARM, also on Oracle Cloud's free server);
 - asks you to accept the Minecraft EULA;
 - creates new secrets;
 - installs the whole network, only the minigames or only CityBuild (`--type`), or your own pick of servers;
 - can run several networks side by side on one machine (`--name`), each with its own ports and ranks;
+- picks smaller RAM sizes by itself on small machines (`--size`); the full network fits Oracle Cloud's free 12 GB server;
 - sets up one systemd service per server;
 - opens only the proxy port.
 

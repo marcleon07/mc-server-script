@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Installs the Minecraft network from this package on a Linux server.
-# Debian 12+/Ubuntu 22.04+ (apt) or Fedora/RHEL/Rocky/Alma 9+ (dnf), 64-bit, with internet access.
+# Debian 12+/Ubuntu 22.04+ (apt) or Fedora/RHEL/Rocky/Alma/Oracle Linux 9+ (dnf), 64-bit (x86 or ARM),
+# with internet access. Also runs on Oracle Cloud's free ARM servers (see README.md).
 #
 #   sudo ./install.sh [options]          without --type or --servers it asks what to install
 #     --type TYPE           full       hub + CityBuild + all minigames (default)
@@ -11,7 +12,11 @@
 #                           needs its own name, e.g. --name citybuild; it gets its own ports, ranks
 #                           database and command (mcctl-citybuild)
 #     --owner NAME          your Minecraft name: op everywhere + the owner rank
-#     --ram LIST            change RAM, e.g. bedwars=4G,lobby=1G,proxy=512M
+#     --size SIZE           auto       the biggest sizes that fit this machine (default)
+#                           normal     the RAM the servers have on Windows
+#                           small      about half
+#                           tiny       the full network in 12 GB (Oracle's free server), shorter view distance
+#     --ram LIST            change RAM per server on top, e.g. bedwars=4G,lobby=1G,proxy=512M
 #     --port N              port players connect to (default 25565, or the next free one)
 #     --motd TEXT           server list message (default: made from the installed servers)
 #     --dir PATH            install folder (default /opt/mcnet, or /opt/<name>)
@@ -19,7 +24,7 @@
 #     --no-start            set everything up but do not start the servers
 set -euo pipefail
 PKG="$(cd "$(dirname "$0")" && pwd)"
-NAME=mcnet DIR="" TYPE="" SERVERS="" PORT="" OWNER="" RAM="" MOTD="" EULA=no START=yes
+NAME=mcnet DIR="" TYPE="" SERVERS="" PORT="" OWNER="" SIZE=auto RAM="" MOTD="" EULA=no START=yes
 REGISTRY=/etc/mcnet/networks   # every installed network's folder, so a new one picks free ports
 
 die() { echo "install: $*" >&2; exit 1; }
@@ -29,6 +34,7 @@ while [ $# -gt 0 ]; do
     --servers) SERVERS="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --owner) OWNER="$2"; shift 2 ;;
+    --size) SIZE="$2"; shift 2 ;;
     --ram) RAM="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --motd) MOTD="$2"; shift 2 ;;
@@ -132,7 +138,7 @@ systemctl enable --now mariadb
 id minecraft >/dev/null 2>&1 || useradd --system --user-group --home-dir "$DIR" --no-create-home \
   --shell "$(command -v nologin || echo /bin/false)" minecraft
 args=(--pkg "$PKG" --dest "$DIR" --java "$JAVA" --name "$NAME" --type "$TYPE" --servers "$SERVERS"
-      --ram "$RAM" --motd "$MOTD" --owner "$OWNER" --registry "$REGISTRY" --accept-eula)
+      --size "$SIZE" --ram "$RAM" --motd "$MOTD" --owner "$OWNER" --registry "$REGISTRY" --accept-eula)
 [ -n "$PORT" ] && args+=(--port "$PORT")
 python3 "$PKG/configure.py" "${args[@]}"
 source "$DIR/network.conf"   # what configure.py chose: SERVERS, HUB, PORT, OWNER_UUID
@@ -166,10 +172,26 @@ systemctl daemon-reload
 "$DIR/bin/mcctl" autobackup on
 
 # ---- firewall: only the proxy port is opened; the servers listen on 127.0.0.1 only ------------------------
+blocks() { "$1" -S INPUT 2>/dev/null | grep -qE '^-P INPUT DROP|-j (REJECT|DROP)'; }
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow "$PORT/tcp"
 elif systemctl is-active -q firewalld 2>/dev/null; then
   firewall-cmd -q --permanent --add-port="$PORT/tcp" && firewall-cmd -q --reload
+elif command -v iptables >/dev/null && blocks iptables; then
+  # plain iptables rules that reject everything else, like on Oracle Cloud's Ubuntu images
+  for t in iptables ip6tables; do
+    command -v "$t" >/dev/null && blocks "$t" || continue
+    "$t" -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || "$t" -I INPUT 1 -p tcp --dport "$PORT" -j ACCEPT
+  done
+  if command -v netfilter-persistent >/dev/null; then
+    netfilter-persistent save >/dev/null 2>&1
+  elif [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4
+    ! command -v ip6tables-save >/dev/null || ip6tables-save > /etc/iptables/rules.v6
+  else
+    echo "WARNING: port $PORT is open in iptables until the next reboot - save the iptables rules to keep it"
+  fi
+  echo "opened TCP $PORT in iptables"
 fi
 if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -E ':3306$' | grep -qvE '^(127\.0\.0\.1|\[::1\]):'; then
   echo "WARNING: MariaDB listens on a public address. Set bind-address=127.0.0.1 in its config and restart it."
@@ -200,3 +222,10 @@ Network $NAME installed in $DIR.  Players join: $join
   sudo $CTL backup            backup into $DIR/backups (also runs every night at 04:00)
 If the machine is at a hosting provider, also allow TCP $PORT in its firewall panel.
 EOF
+if grep -qi oraclecloud /sys/class/dmi/id/chassis_asset_tag 2>/dev/null; then
+  cat <<EOF
+Oracle Cloud: add an ingress rule, or players can't get in. In the Oracle console:
+  Networking > Virtual cloud networks > (your network) > Security > Default security list >
+  Add ingress rules: source CIDR 0.0.0.0/0, IP protocol TCP, destination port $PORT
+EOF
+fi

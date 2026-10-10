@@ -3,7 +3,7 @@ Called by install.sh (as root); it does not touch anything outside --dest except
 
 python3 configure.py --pkg <package dir> --dest <install dir> --java <java path>
                      [--type full|minigames|citybuild] [--servers lobby,bedwars,...] [--name mcnet]
-                     [--port 25565] [--ram bedwars=4G,...] [--motd TEXT] [--owner <Minecraft name>]
+                     [--port 25565] [--size auto|normal|small] [--ram bedwars=4G,...] [--motd TEXT] [--owner <Minecraft name>]
                      [--accept-eula] [--skip-db] [--registry /etc/mcnet/networks]
 """
 import argparse, json, os, re, secrets, shlex, shutil, socket, subprocess, sys, urllib.request
@@ -16,6 +16,8 @@ ap.add_argument("--type", default="full", help="full, minigames or citybuild")
 ap.add_argument("--servers", default="", help="pick servers yourself (instead of --type)")
 ap.add_argument("--name", default="mcnet", help="name of this network, for more than one on a machine")
 ap.add_argument("--port", type=int, help="port players connect to (default 25565 or the next free one)")
+ap.add_argument("--size", default="auto", choices=["auto", "normal", "small", "tiny"],
+                help="RAM: normal, small (about half), tiny (the full network in 12 GB) or auto (the biggest that fits)")
 ap.add_argument("--ram", default="")
 ap.add_argument("--motd", default="", help="server list message (default: made from the servers)")
 ap.add_argument("--owner", default="")
@@ -69,7 +71,39 @@ names = [s["name"] for s in servers]
 hub = "lobby" if "lobby" in names else names[0]       # where players arrive (and where the ranks are imported)
 games = [s for s in servers if kind(s) == "game"]
 
-ram = {s["name"]: s["ram"] for s in servers} | {"proxy": net["proxy"]["ram"]}
+# ---- RAM: normal (the package's values), small (about half) or tiny; --ram changes single servers on top --
+def mb(v):
+    return int(v[:-1]) * (1024 if v.endswith("G") else 1)
+
+
+def fmt(m):
+    return f"{m // 1024}G" if m % 1024 == 0 else f"{m}M"
+
+
+def estimate(r):
+    """MB the machine needs: the heaps, Java's own memory next to each heap (measured: about 360 MB per
+    Paper server with these plugins, 160 MB for Velocity), Linux and MariaDB."""
+    return sum(mb(v) for v in r.values()) + 360 * (len(r) - 1) + 160 + 750
+
+
+# tiny: the full network in Oracle's free 12 GB. Measured with no players, the heaps hold 270-450 MB after a
+# full GC; these sizes leave 300-1100 MB for players. Servers this table doesn't know get 40%, at least 768M.
+TINY = {"lobby": "1G", "citybuild": "1536M", "bedwars": "1G", "skywars": "768M", "hideseek": "768M",
+        "duels": "1G", "parkour": "768M", "proxy": "256M"}
+normal = {s["name"]: s["ram"] for s in servers} | {"proxy": net["proxy"]["ram"]}
+sizes = {"normal": normal,
+         "small": {n: fmt(max(1024, mb(v) // 2 // 256 * 256)) for n, v in normal.items()} | {"proxy": "512M"},
+         "tiny": {n: TINY.get(n) or fmt(max(768, mb(v) * 2 // 5 // 256 * 256)) for n, v in normal.items()}}
+try:
+    have = int(re.search(r"MemTotal:\s+(\d+)", open("/proc/meminfo").read()).group(1)) // 1024
+except OSError:
+    have = None                                     # not Linux (a test run): assume it fits
+size = a.size
+if size == "auto":                                  # the biggest size that fits
+    size = next((z for z in sizes if have is None or estimate(sizes[z]) <= have), "tiny")
+    if size != "normal":
+        print(f"this machine has {have / 1024:.1f} GB: using the {size} RAM sizes (--size normal to override)")
+ram = dict(sizes[size])
 for item in filter(None, a.ram.split(",")):
     k, _, v = item.partition("=")
     if k not in ram or not re.fullmatch(r"\d+[MG]", v):
@@ -175,9 +209,21 @@ if a.accept_eula:
     for s in servers:
         open(J(a.dest, s["folder"], "eula.txt"), "w").write(
             "# Accepted during install (https://aka.ms/MinecraftEULA)\neula=true\n")
+# tiny: shorter view distances, so each player keeps fewer chunks in memory (CityBuild a bit more, to explore)
+VIEW = {"survival": (8, 5), "hub": (6, 4), "game": (6, 4)}
+
+
+def properties(t, s):
+    t = re.sub(r"(?m)^server-port=\d+", f"server-port={port_of[s['name']]}", t)
+    if size == "tiny":
+        view, sim = VIEW[kind(s)]
+        t = re.sub(r"(?m)^view-distance=\d+", f"view-distance={view}", t)
+        t = re.sub(r"(?m)^simulation-distance=\d+", f"simulation-distance={sim}", t)
+    return t
+
+
 for s in servers:
-    edit(J(a.dest, s["folder"], "server.properties"),
-         lambda t: re.sub(r"(?m)^server-port=\d+", f"server-port={port_of[s['name']]}", t))
+    edit(J(a.dest, s["folder"], "server.properties"), lambda t: properties(t, s))
 
 LABEL = {"bedwars": "<aqua>BedWars", "skywars": "<green>SkyWars", "hideseek": "<yellow>Hide&Seek",
          "duels": "<red>Duels", "parkour": "<gold>Parkour", "citybuild": "<light_purple>CityBuild"}
@@ -256,17 +302,14 @@ open(J(a.dest, "network.conf"), "w", newline="\n").write(
     f"HUB={hub}\n"
     f"PORT={port}\n"
     f"DB={db}\n"
+    f"# RAM sizes chosen at install: {size}\n"
     f"OWNER_UUID={owner_uuid}\n"
     "# how many backups mcctl backup keeps (the oldest are removed)\n"
     "BACKUP_KEEP=7\n")
 print(f"players join on port {port}" + ("" if port == 25565 else " (put it after the address: <ip>:" + str(port) + ")"))
 
-gb = lambda v: int(v[:-1]) / (1024 if v.endswith("M") else 1)
-need = sum(gb(v) for v in ram.values())
-try:
-    have = int(re.search(r"MemTotal:\s+(\d+)", open("/proc/meminfo").read()).group(1)) / 1024 / 1024
-    print(f"RAM: the servers use {need:.1f} GB, this machine has {have:.1f} GB")
-    if need > have - 1:
-        print("WARNING: not enough memory for all servers - install fewer (--servers) or lower --ram")
-except OSError:
-    pass
+print("RAM (" + size + "): " + ", ".join(f"{n} {v}" for n, v in ram.items()))
+if have is not None:
+    print(f"memory: about {estimate(ram) / 1024:.1f} GB needed with Java and Linux, this machine has {have / 1024:.1f} GB")
+    if estimate(ram) > have:
+        print("WARNING: not enough memory for all servers - install fewer (--type/--servers) or lower --ram")

@@ -15,6 +15,8 @@ RestartSec=10
 SuccessExitStatus=0 143
 TimeoutStopSec=120
 LimitNOFILE=65536
+# glibc gives every thread pool its own malloc arena; capping them saves 100+ MB per Java process
+Environment=MALLOC_ARENA_MAX=2
 # a compromised plugin can only write inside the network folder
 NoNewPrivileges=yes
 PrivateTmp=yes

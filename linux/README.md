@@ -4,7 +4,7 @@ This package is a copy of the Windows network: the hub, CityBuild, BedWars, SkyW
 
 ## Install
 
-You need a 64-bit Linux server running Debian 12+, Ubuntu 22.04+, or Fedora/RHEL/Rocky/Alma 9+, with internet access and root rights. Copy the package to the server, then:
+You need a 64-bit Linux server (x86 or ARM) running Debian 12+, Ubuntu 22.04+, or Fedora/RHEL/Rocky/Alma/Oracle Linux 9+, with internet access and root rights. Copy the package to the server, then:
 
 ```bash
 tar xzf mcnet-*.tar.gz
@@ -70,7 +70,8 @@ In a CityBuild-only network, the travel commands to the hub and the games (`/lob
 | `--servers` | `lobby,bedwars,skywars` | Pick the servers yourself instead. The proxy is always installed. |
 | `--name` | `citybuild` | Name of the network, for a second one on the same machine. Folder, command and services follow it. |
 | `--motd` | `'<gold>My server'` | Server list message (MiniMessage colours). |
-| `--ram` | `bedwars=4G,lobby=1G` | Change RAM per server. |
+| `--size` | `tiny` | `auto` (default): the biggest sizes that fit the machine. `normal`: the Windows values. `small`: about half. `tiny`: the full network in 12 GB. |
+| `--ram` | `bedwars=4G,lobby=1G` | Change RAM per server, on top of `--size`. |
 | `--port` | `25565` | Port players connect to. Default 25565, or the next free one. |
 | `--dir` | `/opt/mcnet` | Install folder. Default `/opt/mcnet`, or `/opt/<name>`. |
 | `--owner` | `Steve` | Op on every server, plus the owner rank. |
@@ -79,18 +80,43 @@ In a CityBuild-only network, the travel commands to the hub and the games (`/lob
 
 ### RAM
 
-| Server | RAM |
-|---|---|
-| lobby (hub) | 2G |
-| citybuild | 4G |
-| bedwars | 3G |
-| skywars | 2G |
-| hideseek | 2G |
-| duels | 2G |
-| parkour | 1.5G |
-| proxy | 0.5G |
+| Server | normal | small | tiny |
+|---|---|---|---|
+| lobby (hub) | 2G | 1G | 1G |
+| citybuild | 4G | 2G | 1.5G |
+| bedwars | 3G | 1.5G | 1G |
+| skywars | 2G | 1G | 768M |
+| hideseek | 2G | 1G | 768M |
+| duels | 2G | 1G | 1G |
+| parkour | 1.5G | 1G | 768M |
+| proxy | 0.5G | 0.5G | 256M |
 
-The full network needs about 17 GB plus 1–2 GB for Linux and MariaDB. Minigames only needs about 13 GB, CityBuild only about 5 GB. For a small machine, install fewer servers; for example `--servers lobby,bedwars,skywars` needs about 8 GB. Hub gates for games you didn't install stay in the world but do nothing.
+Java needs about 360 MB next to each Paper server's RAM (measured with these plugins), and Linux and MariaDB need about 0.75 GB. All together, the machine needs:
+
+| Setup | normal | small | tiny |
+|---|---|---|---|
+| full network | about 20 GB | about 12.5 GB | about 10.5 GB |
+| minigames | about 16 GB | about 10 GB | about 8.5 GB |
+| CityBuild only | about 6 GB | about 4 GB | about 3 GB |
+
+The installer checks the machine's memory and picks the biggest sizes that fit.
+
+`tiny` also shortens the view distance to 6 chunks (CityBuild 8), so each player costs less memory. With no players, each server holds 270–450 MB of live data; tiny leaves 300 MB to 1 GB on top of that for players. That's fine for a small community of about 10–20 players at once. With more players, use a bigger machine. For a small machine, install fewer servers; for example `--servers lobby,bedwars,skywars` needs about 8 GB. Hub gates for games you didn't install stay in the world but do nothing.
+
+## Free hosting: Oracle Cloud
+
+Oracle's "Always Free" ARM server has 2 cores and 12 GB of RAM (Oracle cut it from 24 GB in June 2026). With the `tiny` sizes, the full network fits: it needs about 10.5 GB.
+
+1. Create an Oracle Cloud account. It needs a credit card to verify you, but the free server costs nothing.
+2. Create an instance: shape **VM.Standard.A1.Flex** with 2 OCPUs and 12 GB, image **Ubuntu 24.04** or **Oracle Linux 9**. If it says "out of capacity", try another availability domain or try again later.
+3. Open the port in Oracle's own firewall. Go to **Networking > Virtual cloud networks >** (your network) **> Security > Default security list > Add ingress rules**. Use source `0.0.0.0/0`, protocol TCP, destination port `25565`.
+4. Log in with SSH, copy the package over, and install:
+   ```bash
+   sudo ./install.sh --owner YourMinecraftName
+   ```
+   The installer picks the `tiny` sizes for the full network (or `small` for minigames only) and opens the port inside the machine too. On Ubuntu, that means Oracle's iptables rules. At the end, it reminds you of step 3.
+
+The 2 cores are the other limit: eight servers share them. With few players that is fine, but the first start, when every server prepares its files at once, takes several minutes. Oracle can reclaim free servers it thinks are idle, so keep backups somewhere else.
 
 ## Running it: `sudo mcctl`
 
